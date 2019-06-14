@@ -24,4 +24,15 @@ pub trait ProofSystem {
     ) -> bool;
 
     fn export_solidity_verifier(&self, reader: BufReader<File>) -> String;
+
+    #[cfg(feature = "scout")]
+    fn scout_generate_proof(
+        &self,
+        program: ir::Prog<FieldPrime>,
+        witness: ir::Witness<FieldPrime>,
+        pk_path: &str,
+        proof_path: &str,
+    ) -> bool;
+    #[cfg(feature = "scout")]
+    fn scout_export_verifier(&self, reader: BufReader<File>) -> String;
 }

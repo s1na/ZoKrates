@@ -9,6 +9,7 @@ edition = "2018"
 default = []
 libsnark = ["zokrates_core/libsnark"]
 wasm = ["zokrates_core/wasm"]
+scout = ["zokrates_core/scout"]
 
 [dependencies]
 clap = "2.26.2"

@@ -5,6 +5,8 @@ use crate::proof_system::ProofSystem;
 use bellman::groth16::Parameters;
 use regex::Regex;
 use std::fs::File;
+#[cfg(feature = "scout")]
+use std::io::Read;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use zokrates_field::field::FieldPrime;
@@ -134,6 +136,53 @@ impl ProofSystem for G16 {
             SOLIDITY_G2_ADDITION_LIB, SOLIDITY_PAIRING_LIB, template_text
         )
     }
+
+    #[cfg(feature = "scout")]
+    fn scout_generate_proof(
+        &self,
+        program: ir::Prog<FieldPrime>,
+        witness: ir::Witness<FieldPrime>,
+        pk_path: &str,
+        proof_path: &str,
+    ) -> bool {
+        std::env::set_var("BELLMAN_VERBOSE", "0");
+
+        println!("{}", G16_WARNING);
+
+        let computation = Computation::with_witness(program, witness);
+        let parameters_file = File::open(PathBuf::from(pk_path)).unwrap();
+
+        let params = Parameters::read(parameters_file, true).unwrap();
+
+        let proof = computation.clone().prove(&params);
+
+        let mut proof_file = File::create(PathBuf::from(proof_path)).unwrap();
+        write!(
+            proof_file,
+            "{}",
+            serialize::serialize_scout_proof(&proof, &computation.public_inputs_values())
+        )
+        .unwrap();
+        true
+    }
+
+    #[cfg(feature = "scout")]
+    fn scout_export_verifier(&self, mut reader: BufReader<File>) -> String {
+        let mut vk_raw = String::new();
+        reader.read_to_string(&mut vk_raw).unwrap();
+
+        let vk = serialize::deserialize_vk(&vk_raw);
+        let mut vk_bytes = vec![];
+        vk.write(&mut vk_bytes).unwrap();
+
+        let mut template = String::from(SCOUT_VERIFIER_TEMPLATE);
+        let vk_regex = Regex::new(r#"(<%vk%>)"#).unwrap();
+        template = vk_regex
+            .replace(template.as_str(), format!("{:?}", vk_bytes).as_str())
+            .into_owned();
+
+        format!("{}", template)
+    }
 }
 
 mod serialize {
@@ -143,6 +192,17 @@ mod serialize {
     };
     use bellman::groth16::{Proof, VerifyingKey};
     use pairing::bn256::{Bn256, Fr};
+
+    #[cfg(feature = "scout")]
+    use crate::proof_system::bn128::utils::bellman::{
+        decode_hex, g1_from_hex, g2_from_hex, parse_fr,
+    };
+    #[cfg(feature = "scout")]
+    use pairing::bn256::G1Uncompressed;
+    #[cfg(feature = "scout")]
+    use pairing::EncodedPoint;
+    #[cfg(feature = "scout")]
+    use regex::Regex;
 
     pub fn serialize_vk(vk: VerifyingKey<Bn256>) -> String {
         format!(
@@ -185,6 +245,105 @@ mod serialize {
                 .collect::<Vec<_>>()
                 .join(", "),
         )
+    }
+
+    #[cfg(feature = "scout")]
+    pub fn serialize_scout_proof(p: &Proof<Bn256>, inputs: &Vec<Fr>) -> String {
+        let mut buf = vec![];
+
+        // Write proof bytes
+        p.write(&mut buf).unwrap();
+
+        // Append number of public inputs as a u32
+        buf.extend_from_slice(&(inputs.len() as u32).to_be_bytes()[..]);
+
+        // Append each public input
+        for input in inputs {
+            let bytes = decode_hex(parse_fr(input).as_str());
+            buf.extend(bytes);
+        }
+
+        to_hex_string(&buf)
+    }
+
+    #[cfg(feature = "scout")]
+    pub fn deserialize_vk(s: &str) -> VerifyingKey<Bn256> {
+        let iv_count_re = Regex::new(r"vk.gammaABC.len\(\) = (\d+)").unwrap();
+        let gamma_abc_len = u32::from_str_radix(
+            iv_count_re.captures(s).unwrap().get(1).unwrap().as_str(),
+            10,
+        )
+        .unwrap();
+
+        let alpha_re =
+            Regex::new(r"vk.alpha = (0[xX][0-9a-fA-F]{64}), (0[xX][0-9a-fA-F]{64})").unwrap();
+        let a_captures = alpha_re.captures(s).unwrap();
+        let alpha = g1_from_hex(
+            a_captures.get(1).unwrap().as_str(),
+            a_captures.get(2).unwrap().as_str(),
+        );
+
+        let beta_re = Regex::new(r"vk.beta = \[(0[xX][0-9a-fA-F]{64}), (0[xX][0-9a-fA-F]{64})\], \[(0[xX][0-9a-fA-F]{64}), (0[xX][0-9a-fA-F]{64})\]").unwrap();
+        let b_captures = beta_re.captures(s).unwrap();
+        let beta = g2_from_hex(
+            b_captures.get(1).unwrap().as_str(),
+            b_captures.get(2).unwrap().as_str(),
+            b_captures.get(3).unwrap().as_str(),
+            b_captures.get(4).unwrap().as_str(),
+        );
+
+        let gamma_re = Regex::new(r"vk.gamma = \[(0[xX][0-9a-fA-F]{64}), (0[xX][0-9a-fA-F]{64})\], \[(0[xX][0-9a-fA-F]{64}), (0[xX][0-9a-fA-F]{64})\]").unwrap();
+        let g_captures = gamma_re.captures(s).unwrap();
+        let gamma = g2_from_hex(
+            g_captures.get(1).unwrap().as_str(),
+            g_captures.get(2).unwrap().as_str(),
+            g_captures.get(3).unwrap().as_str(),
+            g_captures.get(4).unwrap().as_str(),
+        );
+
+        let delta_re = Regex::new(r"vk.delta = \[(0[xX][0-9a-fA-F]{64}), (0[xX][0-9a-fA-F]{64})\], \[(0[xX][0-9a-fA-F]{64}), (0[xX][0-9a-fA-F]{64})\]").unwrap();
+        let d_captures = delta_re.captures(s).unwrap();
+        let delta = g2_from_hex(
+            d_captures.get(1).unwrap().as_str(),
+            d_captures.get(2).unwrap().as_str(),
+            d_captures.get(3).unwrap().as_str(),
+            d_captures.get(4).unwrap().as_str(),
+        );
+
+        let mut gamma_abc = vec![];
+        for x in 0..gamma_abc_len {
+            let gamma_abc_re = Regex::new(&format!(
+                r"vk.gammaABC\[{}\] = (0[xX][0-9a-fA-F]{{64}}), (0[xX][0-9a-fA-F]{{64}})",
+                x
+            ))
+            .unwrap();
+            let ic_captures = gamma_abc_re.captures(s).unwrap();
+            gamma_abc.push(g1_from_hex(
+                ic_captures.get(1).unwrap().as_str(),
+                ic_captures.get(2).unwrap().as_str(),
+            ));
+        }
+
+        // `beta_g1` and `delta_g1` are unnecessary, set them to empty
+        let empty_g1 = G1Uncompressed::empty()
+            .into_affine_unchecked()
+            .expect("valid affine");
+
+        VerifyingKey {
+            alpha_g1: alpha,
+            beta_g1: empty_g1,
+            beta_g2: beta,
+            gamma_g2: gamma,
+            delta_g1: empty_g1,
+            delta_g2: delta,
+            ic: gamma_abc,
+        }
+    }
+
+    #[cfg(feature = "scout")]
+    fn to_hex_string(bytes: &[u8]) -> String {
+        let strs: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        strs.connect("")
     }
 }
 
@@ -248,6 +407,145 @@ contract Verifier {
             return false;
         }
     }
+}
+"#;
+
+#[cfg(feature = "scout")]
+const SCOUT_VERIFIER_TEMPLATE: &str = r#"
+extern crate bellman_ce;
+extern crate byteorder;
+extern crate ewasm_api;
+extern crate pairing_ce;
+use bellman_ce::groth16::{prepare_verifying_key, verify_proof, Proof, VerifyingKey};
+use byteorder::{BigEndian, ReadBytesExt};
+use ewasm_api::*;
+use pairing_ce::bn256::{Bn256, Fr, G1Uncompressed, G2Uncompressed};
+use pairing_ce::EncodedPoint;
+use std::io::Read;
+
+extern "C" {
+    fn debug_startTimer();
+    fn debug_endTimer();
+}
+
+const VERIFYING_KEY: [u8; 772] = <%vk%>;
+
+/// Copy of bellman_ce::groth16::VerifyingKey::read which uses
+/// `into_affine_unchecked` instead of `into_affine` for fields
+/// `beta_g1` and `delta_g1`, as they're not part of the encoded
+/// verifying key and are not necessary for proof verification.
+/// It also throws on any error and doesn't return a Result.
+fn parse_verifying_key<R: Read>(mut reader: R) -> VerifyingKey<Bn256> {
+    let mut g1_repr = G1Uncompressed::empty();
+    let mut g2_repr = G2Uncompressed::empty();
+
+    reader.read_exact(g1_repr.as_mut()).unwrap();
+    let alpha_g1 = g1_repr.into_affine().unwrap();
+
+    reader.read_exact(g1_repr.as_mut()).unwrap();
+    let beta_g1 = g1_repr.into_affine_unchecked().unwrap();
+
+    reader.read_exact(g2_repr.as_mut()).unwrap();
+    let beta_g2 = g2_repr.into_affine().unwrap();
+
+    reader.read_exact(g2_repr.as_mut()).unwrap();
+    let gamma_g2 = g2_repr.into_affine().unwrap();
+
+    reader.read_exact(g1_repr.as_mut()).unwrap();
+    let delta_g1 = g1_repr.into_affine_unchecked().unwrap();
+
+    reader.read_exact(g2_repr.as_mut()).unwrap();
+    let delta_g2 = g2_repr.into_affine().unwrap();
+
+    let ic_len = reader.read_u32::<BigEndian>().unwrap() as usize;
+
+    let mut ic = vec![];
+
+    for _ in 0..ic_len {
+        reader.read_exact(g1_repr.as_mut()).unwrap();
+        let g1 = g1_repr.into_affine().unwrap();
+
+        ic.push(g1);
+    }
+
+    VerifyingKey {
+        alpha_g1: alpha_g1,
+        beta_g1: beta_g1,
+        beta_g2: beta_g2,
+        gamma_g2: gamma_g2,
+        delta_g1: delta_g1,
+        delta_g2: delta_g2,
+        ic: ic,
+    }
+}
+
+fn to_hex_string(bytes: &[u8]) -> String {
+    let strs: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    strs.join("")
+}
+
+/// Reads encoded proof and extracts a `Proof` instance
+/// along with public inputs (both in raw form and as a field element).
+/// Data is encoded as following:
+/// <proof: 128 byte> - <number of inputs: 4 byte> - <input 1: 32 byte> - <input 2: 32 byte>...
+fn parse_proof(raw: &[u8]) -> (Proof<Bn256>, Vec<Fr>, Vec<[u8; 32]>) {
+    let mut proof_raw: [u8; 128] = [0; 128];
+    proof_raw[..128].copy_from_slice(&raw[..128]);
+    let proof = Proof::read(&proof_raw[..]).unwrap();
+
+    let mut inputs = vec![];
+    let mut input_bytes = vec![];
+    let inputs_len = u32::from_be_bytes([raw[128], raw[129], raw[130], raw[131]]);
+    for i in 0..inputs_len {
+        let mut input: [u8; 32] = [0; 32];
+        input[..32]
+            .copy_from_slice(&raw[(132 + (i * 32)) as usize..(132 + ((i + 1) * 32)) as usize]);
+        input_bytes.push(input);
+        let hex = to_hex_string(&input[..]);
+        inputs.push(Fr::from_hex(hex.as_str()).unwrap());
+    }
+
+    (proof, inputs, input_bytes)
+}
+
+fn process_block(pre_state_root: types::Bytes32, block_data: &[u8]) -> types::Bytes32 {
+    let (proof, public_inputs, public_input_bytes) = parse_proof(block_data);
+
+    assert!(pre_state_root.bytes == public_input_bytes[0]);
+
+    // Prepare verifying key
+    let pk = parse_verifying_key(VERIFYING_KEY.as_ref());
+    let pvk = prepare_verifying_key(&pk);
+
+    // Start the benchmarking timer
+    unsafe {
+        debug_startTimer();
+    }
+
+    let mut post_state_root = types::Bytes32::default();
+    // If proof is valid, set post_state_root to second
+    // public input
+    if verify_proof(&pvk, &proof, &public_inputs).unwrap() {
+        post_state_root.bytes = public_input_bytes[1];
+    }
+
+    unsafe {
+        debug_endTimer();
+    }
+
+    post_state_root
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn main() {
+    assert!(eth2::block_data_size() > 0);
+
+    let pre_state_root = eth2::load_pre_state_root();
+    let block_data = eth2::acquire_block_data();
+    let post_state_root = process_block(pre_state_root, &block_data);
+
+    eth2::save_post_state_root(post_state_root)
 }
 "#;
 

@@ -7,8 +7,10 @@ use bellman::groth16::{
     Parameters,
 };
 use bellman::{Circuit, ConstraintSystem, LinearCombination, SynthesisError, Variable};
-use pairing::bn256::{Bn256, Fr};
+use pairing::bn256::{Bn256, Fr, G1Affine, G1Uncompressed, G2Affine, G2Uncompressed};
+use pairing::EncodedPoint;
 use std::collections::BTreeMap;
+use std::io::Read;
 use zokrates_field::field::{Field, FieldPrime};
 
 use self::rand::*;
@@ -248,7 +250,7 @@ mod parse {
         )
     }
 
-    fn parse_fr(e: &Fr) -> String {
+    pub fn parse_fr(e: &Fr) -> String {
         let raw_e = e.to_string();
 
         let captures = FR_REGEX.captures(&raw_e).unwrap();
@@ -287,6 +289,38 @@ mod parse {
         let parsed = parse_g2(e);
 
         format!("[{}, {}], [{}, {}]", parsed.0, parsed.1, parsed.2, parsed.3,)
+    }
+
+    #[cfg(feature = "scout")]
+    pub fn g1_from_hex(x: &str, y: &str) -> G1Affine {
+        let mut g1_bytes = decode_hex(x);
+        g1_bytes.extend(decode_hex(y));
+
+        let mut g1_uncompressed = G1Uncompressed::empty();
+        g1_uncompressed.as_mut().copy_from_slice(&g1_bytes);
+
+        g1_uncompressed.into_affine().expect("valid g1")
+    }
+
+    #[cfg(feature = "scout")]
+    pub fn g2_from_hex(c1_x: &str, c0_x: &str, c1_y: &str, c0_y: &str) -> G2Affine {
+        let mut g2_bytes = decode_hex(c1_x);
+        g2_bytes.extend(decode_hex(c0_x));
+        g2_bytes.extend(decode_hex(c1_y));
+        g2_bytes.extend(decode_hex(c0_y));
+
+        let mut g2_uncompressed = G2Uncompressed::empty();
+        g2_uncompressed.as_mut().copy_from_slice(&g2_bytes);
+
+        g2_uncompressed.into_affine().expect("valid g2")
+    }
+
+    #[cfg(feature = "scout")]
+    pub fn decode_hex(s: &str) -> Vec<u8> {
+        (2..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 }
 

@@ -34,7 +34,7 @@ fn cli() -> Result<(), String> {
     let default_scheme = env::var("ZOKRATES_PROVING_SCHEME").unwrap_or(String::from("g16"));
 
     // cli specification using clap library
-    let matches = App::new("ZoKrates")
+    let mut app = App::new("ZoKrates")
     .setting(AppSettings::SubcommandRequiredElseHelp)
     .version(env!("CARGO_PKG_VERSION"))
     .author("Jacob Eberhardt, Thibaut Schaeffer, Stefan Deml")
@@ -200,8 +200,86 @@ fn cli() -> Result<(), String> {
             .required(false)
             .default_value(&default_scheme)
         )
-    )
-    .get_matches();
+    );
+
+    if cfg!(feature = "scout") {
+        app = app
+            .subcommand(SubCommand::with_name("scout-proof")
+                .about("Calculates a proof for a given constraint system and witness as a scout yaml file.")
+                .arg(Arg::with_name("witness")
+                     .short("w")
+                     .long("witness")
+                     .help("Path of the witness file")
+                     .value_name("FILE")
+                     .takes_value(true)
+                     .required(false)
+                     .default_value(WITNESS_DEFAULT_PATH)
+                ).arg(Arg::with_name("provingkey")
+                      .short("p")
+                      .long("provingkey")
+                      .help("Path of the proving key file")
+                      .value_name("FILE")
+                      .takes_value(true)
+                      .required(false)
+                      .default_value(PROVING_KEY_DEFAULT_PATH)
+                ).arg(Arg::with_name("proofpath")
+                      .short("j")
+                      .long("proofpath")
+                      .help("Path of the JSON proof file")
+                      .value_name("FILE")
+                      .takes_value(true)
+                      .required(false)
+                      .default_value(JSON_PROOF_PATH)
+                ).arg(Arg::with_name("input")
+                      .short("i")
+                      .long("input")
+                      .help("Path of compiled code")
+                      .value_name("FILE")
+                      .takes_value(true)
+                      .required(false)
+                      .default_value(FLATTENED_CODE_DEFAULT_PATH)
+                ).arg(Arg::with_name("proving-scheme")
+                      .short("s")
+                      .long("proving-scheme")
+                      .help("Proving scheme to use to generate the proof. Available options are G16 (default), PGHR13 and GM17")
+                      .value_name("FILE")
+                      .takes_value(true)
+                      .required(false)
+                      .default_value(&default_scheme)
+                )
+            )
+            .subcommand(SubCommand::with_name("scout-verifier")
+                .about("Exports a verifier as scout (eth2) script")
+                .arg(Arg::with_name("input")
+                     .short("i")
+                     .long("input")
+                     .help("Path of the verifier")
+                     .value_name("FILE")
+                     .takes_value(true)
+                     .required(false)
+                     .default_value(VERIFICATION_KEY_DEFAULT_PATH)
+                )
+                .arg(Arg::with_name("output")
+                     .short("o")
+                     .long("output")
+                     .help("Path of the output file")
+                     .value_name("FILE")
+                     .takes_value(true)
+                     .required(false)
+                     .default_value(VERIFICATION_CONTRACT_DEFAULT_PATH)
+                ).arg(Arg::with_name("proving-scheme")
+                      .short("s")
+                      .long("proving-scheme")
+                      .help("Proving scheme to use to export the verifier. Available options are G16 (default), PGHR13 and GM17")
+                      .value_name("FILE")
+                      .takes_value(true)
+                      .required(false)
+                      .default_value(&default_scheme)
+                )
+            );
+    }
+
+    let matches = app.get_matches();
 
     match matches.subcommand() {
         ("compile", Some(sub_matches)) => {
@@ -426,6 +504,67 @@ fn cli() -> Result<(), String> {
                 "generate-proof successful: {:?}",
                 scheme.generate_proof(program, witness, pk_path, proof_path)
             );
+        }
+        #[cfg(feature = "scout")]
+        ("scout-proof", Some(sub_matches)) => {
+            println!("Generating proof for scout...");
+
+            let scheme = get_scheme(sub_matches.value_of("proving-scheme").unwrap())?;
+
+            // deserialize witness
+            let witness_path = Path::new(sub_matches.value_of("witness").unwrap());
+            let witness_file = match File::open(&witness_path) {
+                Ok(file) => file,
+                Err(why) => panic!("couldn't open {}: {}", witness_path.display(), why),
+            };
+
+            let witness = ir::Witness::read(witness_file)
+                .map_err(|why| format!("could not load witness: {:?}", why))?;
+
+            let pk_path = sub_matches.value_of("provingkey").unwrap();
+            let proof_path = sub_matches.value_of("proofpath").unwrap();
+
+            let program_path = Path::new(sub_matches.value_of("input").unwrap());
+            let program_file = File::open(&program_path)
+                .map_err(|why| format!("couldn't open {}: {}", program_path.display(), why))?;
+
+            let mut reader = BufReader::new(program_file);
+
+            let program: ir::Prog<FieldPrime> =
+                deserialize_from(&mut reader, Infinite).map_err(|why| format!("{:?}", why))?;
+
+            println!(
+                "generate-proof successful: {:?}",
+                scheme.scout_generate_proof(program, witness, pk_path, proof_path)
+            );
+        }
+        #[cfg(feature = "scout")]
+        ("scout-verifier", Some(sub_matches)) => {
+            {
+                let scheme = get_scheme(sub_matches.value_of("proving-scheme").unwrap())?;
+
+                println!("Exporting scout verifier...");
+
+                // read vk file
+                let input_path = Path::new(sub_matches.value_of("input").unwrap());
+                let input_file = File::open(&input_path)
+                    .map_err(|why| format!("couldn't open {}: {}", input_path.display(), why))?;
+                let reader = BufReader::new(input_file);
+
+                let verifier = scheme.scout_export_verifier(reader);
+
+                //write output file
+                let output_path = Path::new(sub_matches.value_of("output").unwrap());
+                let output_file = File::create(&output_path)
+                    .map_err(|why| format!("couldn't create {}: {}", output_path.display(), why))?;
+
+                let mut writer = BufWriter::new(output_file);
+
+                writer
+                    .write_all(&verifier.as_bytes())
+                    .map_err(|_| "Failed writing output to file.".to_string())?;
+                println!("Finished exporting verifier.");
+            }
         }
         _ => unreachable!(),
     }
